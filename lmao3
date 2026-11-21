@@ -1,0 +1,1322 @@
+--[[
+    MM2 Utility & Role ESP Hub v5 — Windows 11 Fluent Edition
+    Added: Admin Panel Tab with Rank System (Bloxdropo = Owner), Command Box, Target Controls & Quick Admin Actions
+    Tabs:
+      - ESP: Role Highlights (M/S/I), Overhead Role & Distance Tags, Gun Drop ESP
+      - Movement: Speed & Jump Boost, Noclip, Smooth Fly (WASD + Space/Ctrl), Infinite Jump
+      - Actions: Auto-Grab Dropped Gun, Coin/Candy TP Farm, Grab Gun Now, TP to Murderer/Sheriff/Lobby
+      - Server: Anti-AFK, Spectate Murderer/Sheriff/Self, Rejoin Server
+      - Admin: Owner Rank ("Bloxdropo"), Rank Badge, Command Bar (;tp, ;bring/orbit, ;spectate, ;unspectate, ;speed, ;fly, ;noclip, ;reset, ;rejoin), Target Player Selector & Admin Tools
+]]
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
+local VirtualUser = game:GetService("VirtualUser")
+local TeleportService = game:GetService("TeleportService")
+
+local LocalPlayer = Players.LocalPlayer
+local Camera = workspace.CurrentCamera
+
+-- Rank Configuration (Bloxdropo has Owner rank)
+local Ranks = {
+    ["bloxdropo"] = { Role = "Owner", Level = 100, Color = Color3.fromRGB(250, 204, 21) },
+}
+
+local function getUserRank(player)
+    if not player then
+        return { Role = "Guest", Level = 0, Color = Color3.fromRGB(148, 163, 184) }
+    end
+    local entry = Ranks[player.Name:lower()] or Ranks[player.DisplayName:lower()]
+    if entry then
+        return entry
+    end
+    return { Role = "User", Level = 10, Color = Color3.fromRGB(96, 205, 255) }
+end
+
+local localRank = getUserRank(LocalPlayer)
+
+local Settings = {
+    RoleESP = false,
+    NameTags = false,
+    GunESP = false,
+    AutoGrabGun = false,
+    CoinCollect = false,
+    SpeedBoost = false,
+    Noclip = false,
+    Fly = false,
+    InfJump = false,
+    AntiAFK = true,
+    WalkSpeed = 26,
+    JumpPower = 58,
+    FlySpeed = 45,
+    CoinDelay = 0.22,
+}
+
+local roleHighlights = {}
+local roleBillboards = {}
+local gunHighlight = nil
+local noclipConn = nil
+local infJumpConn = nil
+local flyBV = nil
+local flyBG = nil
+local coinLoopRunning = false
+local grabbingGun = false
+local minimized = false
+local savedLobbyCFrame = nil
+local selectedTargetPlayer = nil
+
+-- Fluent Palette (Windows 11 Dark)
+local Theme = {
+    WindowBg = Color3.fromRGB(32, 32, 32),
+    TitleBarBg = Color3.fromRGB(25, 25, 25),
+    NavBg = Color3.fromRGB(28, 28, 28),
+    CardBg = Color3.fromRGB(43, 43, 43),
+    CardHover = Color3.fromRGB(50, 50, 50),
+    SubtleBg = Color3.fromRGB(36, 36, 36),
+    Border = Color3.fromRGB(58, 58, 58),
+    Accent = Color3.fromRGB(96, 205, 255),      -- Fluent Sky Blue
+    AccentDark = Color3.fromRGB(0, 120, 212),   -- Windows 11 Blue
+    TextPrimary = Color3.fromRGB(255, 255, 255),
+    TextSecondary = Color3.fromRGB(190, 190, 190),
+    TextMuted = Color3.fromRGB(140, 140, 140),
+    SwitchOff = Color3.fromRGB(62, 62, 62),
+    KnobOff = Color3.fromRGB(175, 175, 175),
+    Danger = Color3.fromRGB(232, 17, 35),
+    OwnerGold = Color3.fromRGB(250, 204, 21),
+}
+
+LocalPlayer.CharacterAdded:Connect(function(char)
+    task.spawn(function()
+        local root = char:WaitForChild("HumanoidRootPart", 5)
+        if root and not savedLobbyCFrame then
+            savedLobbyCFrame = root.CFrame
+        end
+    end)
+end)
+
+if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then
+    savedLobbyCFrame = LocalPlayer.Character.HumanoidRootPart.CFrame
+end
+
+LocalPlayer.Idled:Connect(function()
+    if Settings.AntiAFK then
+        pcall(function()
+            VirtualUser:CaptureController()
+            VirtualUser:ClickButton2(Vector2.new())
+        end)
+    end
+end)
+
+local function getPlayerRole(player)
+    local containers = {
+        player.Character,
+        player:FindFirstChild("Backpack"),
+        player:FindFirstChild("StarterGear"),
+    }
+
+    for _, container in ipairs(containers) do
+        if container then
+            for _, item in ipairs(container:GetChildren()) do
+                if item:IsA("Tool") then
+                    local lowerName = item.Name:lower()
+                    if lowerName == "knife" or lowerName:find("knife") then
+                        return "Murderer"
+                    elseif lowerName == "gun" or lowerName:find("gun") or lowerName:find("revolver") then
+                        return "Sheriff"
+                    end
+                end
+            end
+        end
+    end
+
+    return "Innocent"
+end
+
+local function getRoleColor(role)
+    if role == "Murderer" then
+        return Color3.fromRGB(248, 113, 113)
+    elseif role == "Sheriff" then
+        return Color3.fromRGB(96, 205, 255)
+    end
+    return Color3.fromRGB(74, 222, 128)
+end
+
+local function findDroppedGun()
+    for _, obj in ipairs(workspace:GetDescendants()) do
+        if obj:IsA("BasePart") and (obj.Name == "GunDrop" or obj.Name == "DroppedGun") then
+            return obj
+        elseif obj:IsA("Tool") and obj.Name == "Gun" and not obj:IsDescendantOf(Players) then
+            local handle = obj:FindFirstChild("Handle")
+            if handle and handle:IsA("BasePart") then
+                return handle
+            end
+        end
+    end
+    return nil
+end
+
+local function findNearestCoin(rootPos)
+    local bestPart = nil
+    local bestDist = math.huge
+
+    for _, obj in ipairs(workspace:GetDescendants()) do
+        if obj:IsA("BasePart") then
+            local n = obj.Name:lower()
+            if n == "coin_server" or n == "coin" or n == "candy" or n:find("coin") or n:find("candy") then
+                if obj.Transparency < 0.95 and obj.Parent then
+                    local dist = (obj.Position - rootPos).Magnitude
+                    if dist < bestDist then
+                        bestDist = dist
+                        bestPart = obj
+                    end
+                end
+            end
+        end
+    end
+
+    return bestPart, bestDist
+end
+
+local function updateRoleVisuals()
+    if not Settings.RoleESP then
+        for _, hl in pairs(roleHighlights) do
+            if hl then hl:Destroy() end
+        end
+        table.clear(roleHighlights)
+    end
+
+    if not Settings.NameTags then
+        for _, bb in pairs(roleBillboards) do
+            if bb then bb:Destroy() end
+        end
+        table.clear(roleBillboards)
+    end
+
+    if not Settings.RoleESP and not Settings.NameTags then
+        return
+    end
+
+    local myRoot = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr ~= LocalPlayer and plr.Character then
+            local role = getPlayerRole(plr)
+            local color = getRoleColor(role)
+            local head = plr.Character:FindFirstChild("Head")
+            local tRoot = plr.Character:FindFirstChild("HumanoidRootPart")
+
+            if Settings.RoleESP then
+                local existing = roleHighlights[plr]
+                if not existing or existing.Parent ~= plr.Character then
+                    if existing then existing:Destroy() end
+                    local hl = Instance.new("Highlight")
+                    hl.Name = "MM2RoleESP"
+                    hl.FillTransparency = 0.45
+                    hl.OutlineTransparency = 0
+                    hl.OutlineColor = Color3.fromRGB(255, 255, 255)
+                    hl.Adornee = plr.Character
+                    hl.Parent = plr.Character
+                    roleHighlights[plr] = hl
+                end
+                roleHighlights[plr].FillColor = color
+            end
+
+            if Settings.NameTags and head then
+                local existingBB = roleBillboards[plr]
+                if not existingBB or existingBB.Parent ~= head then
+                    if existingBB then existingBB:Destroy() end
+                    local bb = Instance.new("BillboardGui")
+                    bb.Name = "MM2RoleTag"
+                    bb.Size = UDim2.fromOffset(165, 32)
+                    bb.StudsOffset = Vector3.new(0, 2.4, 0)
+                    bb.AlwaysOnTop = true
+                    bb.Adornee = head
+                    bb.Parent = head
+
+                    local lbl = Instance.new("TextLabel")
+                    lbl.Name = "Label"
+                    lbl.Size = UDim2.fromScale(1, 1)
+                    lbl.BackgroundTransparency = 1
+                    lbl.Font = Enum.Font.GothamBold
+                    lbl.TextSize = 11
+                    lbl.TextStrokeTransparency = 0.35
+                    lbl.Parent = bb
+
+                    roleBillboards[plr] = bb
+                end
+
+                local distText = ""
+                if myRoot and tRoot then
+                    distText = string.format(" [%dm]", math.floor((tRoot.Position - myRoot.Position).Magnitude))
+                end
+
+                local pRank = getUserRank(plr)
+                local rankPrefix = (pRank.Role == "Owner") and "[OWNER] " or ""
+
+                local tagLabel = roleBillboards[plr]:FindFirstChild("Label")
+                if tagLabel then
+                    tagLabel.TextColor3 = (pRank.Role == "Owner") and pRank.Color or color
+                    tagLabel.Text = string.format("%s%s (%s)%s", rankPrefix, plr.Name, role:sub(1, 3):upper(), distText)
+                end
+            end
+        end
+    end
+
+    for plr, hl in pairs(roleHighlights) do
+        if not plr.Parent or not plr.Character then
+            if hl then hl:Destroy() end
+            roleHighlights[plr] = nil
+        end
+    end
+
+    for plr, bb in pairs(roleBillboards) do
+        if not plr.Parent or not plr.Character then
+            if bb then bb:Destroy() end
+            roleBillboards[plr] = nil
+        end
+    end
+end
+
+local function updateGunESP()
+    local gunPart = Settings.GunESP and findDroppedGun() or nil
+    if not gunPart then
+        if gunHighlight then
+            gunHighlight:Destroy()
+            gunHighlight = nil
+        end
+        return
+    end
+
+    if not gunHighlight or gunHighlight.Adornee ~= gunPart then
+        if gunHighlight then gunHighlight:Destroy() end
+        local hl = Instance.new("Highlight")
+        hl.Name = "MM2GunESP"
+        hl.FillColor = Color3.fromRGB(250, 204, 21)
+        hl.OutlineColor = Color3.fromRGB(255, 255, 255)
+        hl.FillTransparency = 0.25
+        hl.Adornee = gunPart
+        hl.Parent = gunPart
+        gunHighlight = hl
+    end
+end
+
+local function grabDroppedGun()
+    if grabbingGun then return false end
+    local gunPart = findDroppedGun()
+    local char = LocalPlayer.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    if not gunPart or not root then return false end
+
+    grabbingGun = true
+    local oldCFrame = root.CFrame
+    root.CFrame = gunPart.CFrame + Vector3.new(0, 1.5, 0)
+    task.wait(0.14)
+    if root and root.Parent then
+        root.CFrame = oldCFrame
+    end
+    grabbingGun = false
+    return true
+end
+
+local function teleportToPlayer(targetPlr)
+    local myRoot = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+    local tRoot = targetPlr and targetPlr.Character and targetPlr.Character:FindFirstChild("HumanoidRootPart")
+    if myRoot and tRoot then
+        myRoot.CFrame = tRoot.CFrame * CFrame.new(0, 0, 3.5)
+        return true
+    end
+    return false
+end
+
+local function teleportToRole(targetRole)
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr ~= LocalPlayer and plr.Character and getPlayerRole(plr) == targetRole then
+            if teleportToPlayer(plr) then
+                return
+            end
+        end
+    end
+end
+
+local function teleportToLobby()
+    local myRoot = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+    if not myRoot then return end
+
+    local spawnLoc = workspace:FindFirstChild("Lobby") and workspace.Lobby:FindFirstChildOfClass("SpawnLocation")
+        or workspace:FindFirstChildOfClass("SpawnLocation")
+
+    if spawnLoc then
+        myRoot.CFrame = spawnLoc.CFrame + Vector3.new(0, 3, 0)
+    elseif savedLobbyCFrame then
+        myRoot.CFrame = savedLobbyCFrame
+    end
+end
+
+local function spectatePlayer(targetPlr)
+    if not targetPlr then
+        local hum = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+        if hum then
+            Camera.CameraSubject = hum
+        end
+        return
+    end
+
+    local hum = targetPlr.Character and targetPlr.Character:FindFirstChildOfClass("Humanoid")
+    if hum then
+        Camera.CameraSubject = hum
+    end
+end
+
+local function spectateRole(targetRole)
+    if not targetRole then
+        spectatePlayer(nil)
+        return
+    end
+
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr ~= LocalPlayer and plr.Character and getPlayerRole(plr) == targetRole then
+            spectatePlayer(plr)
+            return
+        end
+    end
+end
+
+local function flingTarget(targetPlr)
+    local myChar = LocalPlayer.Character
+    local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
+    local myHum = myChar and myChar:FindFirstChildOfClass("Humanoid")
+    local tRoot = targetPlr and targetPlr.Character and targetPlr.Character:FindFirstChild("HumanoidRootPart")
+    if not myRoot or not myHum or not tRoot then return end
+
+    local oldCFrame = myRoot.CFrame
+    local bav = Instance.new("BodyAngularVelocity")
+    bav.AngularVelocity = Vector3.new(0, 9999, 0)
+    bav.MaxTorque = Vector3.new(math.huge, math.huge, math.huge)
+    bav.P = math.huge
+    bav.Parent = myRoot
+
+    local startTime = os.clock()
+    while (os.clock() - startTime) < 0.45 and tRoot.Parent and myRoot.Parent do
+        myRoot.CFrame = tRoot.CFrame * CFrame.new(0, 0, -1.5)
+        myRoot.AssemblyLinearVelocity = Vector3.new(180, 160, 180)
+        RunService.Heartbeat:Wait()
+    end
+
+    bav:Destroy()
+    if myRoot and myRoot.Parent then
+        myRoot.AssemblyLinearVelocity = Vector3.zero
+        myRoot.AssemblyAngularVelocity = Vector3.zero
+        myRoot.CFrame = oldCFrame
+    end
+end
+
+local function setNoclip(enabled)
+    if noclipConn then
+        noclipConn:Disconnect()
+        noclipConn = nil
+    end
+
+    if enabled then
+        noclipConn = RunService.Stepped:Connect(function()
+            local char = LocalPlayer.Character
+            if char then
+                for _, part in ipairs(char:GetDescendants()) do
+                    if part:IsA("BasePart") then
+                        part.CanCollide = false
+                    end
+                end
+            end
+        end)
+    end
+end
+
+local function setInfJump(enabled)
+    if infJumpConn then
+        infJumpConn:Disconnect()
+        infJumpConn = nil
+    end
+
+    if enabled then
+        infJumpConn = UserInputService.JumpRequest:Connect(function()
+            local hum = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+            if hum then
+                hum:ChangeState(Enum.HumanoidStateType.Jumping)
+            end
+        end)
+    end
+end
+
+local function setFly(enabled)
+    if flyBV then flyBV:Destroy(); flyBV = nil end
+    if flyBG then flyBG:Destroy(); flyBG = nil end
+
+    local char = LocalPlayer.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if not root or not hum then return end
+
+    if enabled then
+        hum.PlatformStand = true
+        flyBG = Instance.new("BodyGyro")
+        flyBG.P = 9e4
+        flyBG.MaxTorque = Vector3.new(9e4, 9e4, 9e4)
+        flyBG.CFrame = root.CFrame
+        flyBG.Parent = root
+
+        flyBV = Instance.new("BodyVelocity")
+        flyBV.MaxForce = Vector3.new(9e4, 9e4, 9e4)
+        flyBV.Velocity = Vector3.zero
+        flyBV.Parent = root
+    else
+        hum.PlatformStand = false
+    end
+end
+
+local function resetAllStates()
+    Settings.SpeedBoost = false
+    Settings.Noclip = false
+    Settings.Fly = false
+    Settings.InfJump = false
+    Settings.CoinCollect = false
+    Settings.AutoGrabGun = false
+    setNoclip(false)
+    setFly(false)
+    setInfJump(false)
+    spectatePlayer(nil)
+
+    local hum = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+    if hum then
+        hum.WalkSpeed = 16
+        hum.UseJumpPower = true
+        hum.JumpPower = 50
+    end
+end
+
+local function startCoinCollector()
+    if coinLoopRunning then return end
+    coinLoopRunning = true
+
+    task.spawn(function()
+        while Settings.CoinCollect do
+            local char = LocalPlayer.Character
+            local root = char and char:FindFirstChild("HumanoidRootPart")
+            if root then
+                local coinPart = findNearestCoin(root.Position)
+                if coinPart and coinPart.Parent then
+                    root.CFrame = coinPart.CFrame + Vector3.new(0, 1.2, 0)
+                end
+            end
+            task.wait(Settings.CoinDelay)
+        end
+        coinLoopRunning = false
+    end)
+end
+
+local function findPlayerByQuery(query)
+    if not query or query == "" then return nil end
+    local q = query:lower()
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr.Name:lower():sub(1, #q) == q or plr.DisplayName:lower():sub(1, #q) == q then
+            return plr
+        end
+    end
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr.Name:lower():find(q, 1, true) or plr.DisplayName:lower():find(q, 1, true) then
+            return plr
+        end
+    end
+    return nil
+end
+
+local adminFeedbackLabel = nil
+local function setAdminFeedback(msg, isError)
+    if adminFeedbackLabel then
+        adminFeedbackLabel.Text = msg
+        adminFeedbackLabel.TextColor3 = isError and Color3.fromRGB(248, 113, 113) or Theme.Accent
+    end
+end
+
+local function runAdminCommand(rawText)
+    local trimmed = rawText:match("^%s*(.-)%s*$")
+    if not trimmed or trimmed == "" then
+        setAdminFeedback("Enter a command (e.g., ;tp, ;speed 40, ;fly, ;reset)", true)
+        return
+    end
+
+    if localRank.Level < 100 then
+        setAdminFeedback("Insufficient rank: Owner required.", true)
+        return
+    end
+
+    local clean = trimmed:gsub("^;", "")
+    local parts = {}
+    for token in clean:gmatch("%S+") do
+        table.insert(parts, token)
+    end
+
+    local cmd = (parts[1] or ""):lower()
+    local arg1 = parts[2]
+
+    if cmd == "tp" or cmd == "goto" then
+        local target = arg1 and findPlayerByQuery(arg1) or selectedTargetPlayer
+        if target and teleportToPlayer(target) then
+            setAdminFeedback("Teleported to " .. target.Name, false)
+        else
+            setAdminFeedback("Target not found or invalid.", true)
+        end
+    elseif cmd == "spectate" or cmd == "view" then
+        local target = arg1 and findPlayerByQuery(arg1) or selectedTargetPlayer
+        if target then
+            spectatePlayer(target)
+            setAdminFeedback("Spectating " .. target.Name, false)
+        else
+            setAdminFeedback("Select or type a target player.", true)
+        end
+    elseif cmd == "unspectate" or cmd == "unview" then
+        spectatePlayer(nil)
+        setAdminFeedback("Camera reset to self.", false)
+    elseif cmd == "fling" then
+        local target = arg1 and findPlayerByQuery(arg1) or selectedTargetPlayer
+        if target then
+            setAdminFeedback("Flinging " .. target.Name .. "...", false)
+            task.spawn(function() flingTarget(target) end)
+        else
+            setAdminFeedback("Target not found.", true)
+        end
+    elseif cmd == "speed" or cmd == "ws" then
+        local spd = tonumber(arg1) or 36
+        Settings.WalkSpeed = spd
+        Settings.SpeedBoost = true
+        local hum = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+        if hum then hum.WalkSpeed = spd end
+        setAdminFeedback("WalkSpeed set to " .. tostring(spd), false)
+    elseif cmd == "fly" then
+        Settings.Fly = not Settings.Fly
+        setFly(Settings.Fly)
+        setAdminFeedback("Fly " .. (Settings.Fly and "enabled" or "disabled"), false)
+    elseif cmd == "noclip" then
+        Settings.Noclip = not Settings.Noclip
+        setNoclip(Settings.Noclip)
+        setAdminFeedback("Noclip " .. (Settings.Noclip and "enabled" or "disabled"), false)
+    elseif cmd == "lobby" then
+        teleportToLobby()
+        setAdminFeedback("Teleported to lobby.", false)
+    elseif cmd == "reset" or cmd == "clear" then
+        resetAllStates()
+        setAdminFeedback("All active states reset.", false)
+    elseif cmd == "rejoin" then
+        setAdminFeedback("Rejoining server...", false)
+        pcall(function()
+            TeleportService:TeleportToPlaceInstance(game.PlaceId, game.JobId, LocalPlayer)
+        end)
+    else
+        setAdminFeedback("Unknown command: " .. cmd, true)
+    end
+end
+
+-- Build Windows 11 Fluent UI
+local guiParent = (type(gethui) == "function" and gethui()) or LocalPlayer:WaitForChild("PlayerGui")
+if guiParent:FindFirstChild("MM2FluentHub") then
+    guiParent.MM2FluentHub:Destroy()
+end
+
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "MM2FluentHub"
+ScreenGui.ResetOnSpawn = false
+ScreenGui.Parent = guiParent
+
+local WIN_W, WIN_H = 490, 356
+local TITLE_H = 38
+
+local Window = Instance.new("Frame")
+Window.Size = UDim2.fromOffset(WIN_W, WIN_H)
+Window.Position = UDim2.fromOffset(44, 100)
+Window.BackgroundColor3 = Theme.WindowBg
+Window.BorderSizePixel = 0
+Window.Active = true
+Window.Draggable = true
+Window.ClipsDescendants = true
+Window.Parent = ScreenGui
+Instance.new("UICorner", Window).CornerRadius = UDim.new(0, 10)
+
+local WinStroke = Instance.new("UIStroke")
+WinStroke.Color = Theme.Border
+WinStroke.Thickness = 1
+WinStroke.Parent = Window
+
+-- Top Title Bar
+local TitleBar = Instance.new("Frame")
+TitleBar.Size = UDim2.new(1, 0, 0, TITLE_H)
+TitleBar.BackgroundColor3 = Theme.TitleBarBg
+TitleBar.BorderSizePixel = 0
+TitleBar.Parent = Window
+
+local TitleLabel = Instance.new("TextLabel")
+TitleLabel.Size = UDim2.new(1, -185, 1, 0)
+TitleLabel.Position = UDim2.fromOffset(14, 0)
+TitleLabel.BackgroundTransparency = 1
+TitleLabel.Text = "MM2 Utility Hub"
+TitleLabel.TextColor3 = Theme.TextPrimary
+TitleLabel.Font = Enum.Font.GothamSemibold
+TitleLabel.TextSize = 12
+TitleLabel.TextXAlignment = Enum.TextXAlignment.Left
+TitleLabel.Parent = TitleBar
+
+local RankBadge = Instance.new("TextLabel")
+RankBadge.Size = UDim2.fromOffset(96, 20)
+RankBadge.Position = UDim2.new(1, -174, 0.5, -10)
+RankBadge.BackgroundColor3 = Theme.SubtleBg
+RankBadge.TextColor3 = localRank.Color
+RankBadge.Font = Enum.Font.GothamBold
+RankBadge.TextSize = 10
+RankBadge.Text = string.upper(localRank.Role) .. " RANK"
+RankBadge.Parent = TitleBar
+Instance.new("UICorner", RankBadge).CornerRadius = UDim.new(1, 0)
+
+local badgeStroke = Instance.new("UIStroke")
+badgeStroke.Color = localRank.Color
+badgeStroke.Thickness = 1
+badgeStroke.Parent = RankBadge
+
+local MinBtn = Instance.new("TextButton")
+MinBtn.Size = UDim2.fromOffset(36, TITLE_H)
+MinBtn.Position = UDim2.new(1, -72, 0, 0)
+MinBtn.BackgroundColor3 = Theme.TitleBarBg
+MinBtn.BackgroundTransparency = 0
+MinBtn.BorderSizePixel = 0
+MinBtn.Text = "—"
+MinBtn.TextColor3 = Theme.TextSecondary
+MinBtn.Font = Enum.Font.GothamMedium
+MinBtn.TextSize = 12
+MinBtn.AutoButtonColor = false
+MinBtn.Parent = TitleBar
+
+local CloseBtn = Instance.new("TextButton")
+CloseBtn.Size = UDim2.fromOffset(36, TITLE_H)
+CloseBtn.Position = UDim2.new(1, -36, 0, 0)
+CloseBtn.BackgroundColor3 = Theme.TitleBarBg
+CloseBtn.BackgroundTransparency = 0
+CloseBtn.BorderSizePixel = 0
+CloseBtn.Text = "×"
+CloseBtn.TextColor3 = Theme.TextSecondary
+CloseBtn.Font = Enum.Font.GothamMedium
+CloseBtn.TextSize = 15
+CloseBtn.AutoButtonColor = false
+CloseBtn.Parent = TitleBar
+Instance.new("UICorner", CloseBtn).CornerRadius = UDim.new(0, 10)
+
+MinBtn.MouseEnter:Connect(function()
+    TweenService:Create(MinBtn, TweenInfo.new(0.12), { BackgroundColor3 = Theme.CardBg }):Play()
+end)
+MinBtn.MouseLeave:Connect(function()
+    TweenService:Create(MinBtn, TweenInfo.new(0.12), { BackgroundColor3 = Theme.TitleBarBg }):Play()
+end)
+
+CloseBtn.MouseEnter:Connect(function()
+    TweenService:Create(CloseBtn, TweenInfo.new(0.12), { BackgroundColor3 = Theme.Danger, TextColor3 = Theme.TextPrimary }):Play()
+end)
+CloseBtn.MouseLeave:Connect(function()
+    TweenService:Create(CloseBtn, TweenInfo.new(0.12), { BackgroundColor3 = Theme.TitleBarBg, TextColor3 = Theme.TextSecondary }):Play()
+end)
+
+CloseBtn.MouseButton1Click:Connect(function()
+    setFly(false)
+    setNoclip(false)
+    ScreenGui:Destroy()
+end)
+
+-- Main Workspace Area (Left Nav + Right Content)
+local ContentArea = Instance.new("Frame")
+ContentArea.Size = UDim2.new(1, 0, 1, -TITLE_H)
+ContentArea.Position = UDim2.fromOffset(0, TITLE_H)
+ContentArea.BackgroundTransparency = 1
+ContentArea.Parent = Window
+
+MinBtn.MouseButton1Click:Connect(function()
+    minimized = not minimized
+    ContentArea.Visible = not minimized
+    TweenService:Create(Window, TweenInfo.new(0.18, Enum.EasingStyle.Quint), {
+        Size = UDim2.fromOffset(WIN_W, minimized and TITLE_H or WIN_H)
+    }):Play()
+end)
+
+-- Left Navigation Rail
+local NavRail = Instance.new("Frame")
+NavRail.Size = UDim2.new(0, 136, 1, 0)
+NavRail.BackgroundColor3 = Theme.NavBg
+NavRail.BorderSizePixel = 0
+NavRail.Parent = ContentArea
+
+local NavDivider = Instance.new("Frame")
+NavDivider.Size = UDim2.new(0, 1, 1, 0)
+NavDivider.Position = UDim2.new(1, -1, 0, 0)
+NavDivider.BackgroundColor3 = Theme.Border
+NavDivider.BorderSizePixel = 0
+NavDivider.Parent = NavRail
+
+local NavIndicator = Instance.new("Frame")
+NavIndicator.Size = UDim2.fromOffset(3, 18)
+NavIndicator.Position = UDim2.fromOffset(2, 15)
+NavIndicator.BackgroundColor3 = Theme.Accent
+NavIndicator.BorderSizePixel = 0
+NavIndicator.Parent = NavRail
+Instance.new("UICorner", NavIndicator).CornerRadius = UDim.new(1, 0)
+
+local StatusPill = Instance.new("TextLabel")
+StatusPill.Size = UDim2.new(1, -14, 0, 38)
+StatusPill.Position = UDim2.new(0, 7, 1, -46)
+StatusPill.BackgroundColor3 = Theme.SubtleBg
+StatusPill.TextColor3 = Theme.TextSecondary
+StatusPill.Font = Enum.Font.Code
+StatusPill.TextSize = 10
+StatusPill.TextWrapped = true
+StatusPill.Text = "Mur: --\nShf: --"
+StatusPill.Parent = NavRail
+Instance.new("UICorner", StatusPill).CornerRadius = UDim.new(0, 6)
+
+-- Right Scrollable Page Container
+local PageHost = Instance.new("Frame")
+PageHost.Size = UDim2.new(1, -136, 1, 0)
+PageHost.Position = UDim2.fromOffset(136, 0)
+PageHost.BackgroundTransparency = 1
+PageHost.Parent = ContentArea
+
+local TabDefs = {
+    { Name = "ESP", Label = "Visuals & ESP" },
+    { Name = "Movement", Label = "Movement" },
+    { Name = "Actions", Label = "Round Actions" },
+    { Name = "Server", Label = "Server & Cam" },
+    { Name = "Admin", Label = "Admin Panel" },
+}
+
+local Pages = {}
+local NavButtons = {}
+
+local function switchTab(tabName, index)
+    for name, page in pairs(Pages) do
+        page.Visible = (name == tabName)
+    end
+    for name, btn in pairs(NavButtons) do
+        local selected = (name == tabName)
+        TweenService:Create(btn, TweenInfo.new(0.14), {
+            BackgroundColor3 = selected and Theme.CardBg or Theme.NavBg,
+            TextColor3 = selected and Theme.TextPrimary or Theme.TextSecondary,
+        }):Play()
+    end
+    if index then
+        local targetY = 8 + (index - 1) * 36 + 8
+        TweenService:Create(NavIndicator, TweenInfo.new(0.18, Enum.EasingStyle.Quint), {
+            Position = UDim2.fromOffset(2, targetY)
+        }):Play()
+    end
+end
+
+for idx, def in ipairs(TabDefs) do
+    local navBtn = Instance.new("TextButton")
+    navBtn.Size = UDim2.new(1, -12, 0, 30)
+    navBtn.Position = UDim2.fromOffset(6, 8 + (idx - 1) * 36)
+    navBtn.BackgroundColor3 = Theme.NavBg
+    navBtn.TextColor3 = (def.Name == "Admin") and Theme.OwnerGold or Theme.TextSecondary
+    navBtn.Font = (def.Name == "Admin") and Enum.Font.GothamBold or Enum.Font.GothamMedium
+    navBtn.TextSize = 11
+    navBtn.Text = "  " .. def.Label
+    navBtn.TextXAlignment = Enum.TextXAlignment.Left
+    navBtn.AutoButtonColor = false
+    navBtn.Parent = NavRail
+    Instance.new("UICorner", navBtn).CornerRadius = UDim.new(0, 6)
+    NavButtons[def.Name] = navBtn
+
+    local scroll = Instance.new("ScrollingFrame")
+    scroll.Size = UDim2.new(1, 0, 1, 0)
+    scroll.BackgroundTransparency = 1
+    scroll.BorderSizePixel = 0
+    scroll.ScrollBarThickness = 4
+    scroll.ScrollBarImageColor3 = Theme.TextMuted
+    scroll.CanvasSize = UDim2.fromOffset(0, 0)
+    scroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+    scroll.Visible = false
+    scroll.Parent = PageHost
+    Pages[def.Name] = scroll
+
+    local layout = Instance.new("UIListLayout")
+    layout.Padding = UDim.new(0, 8)
+    layout.SortOrder = Enum.SortOrder.LayoutOrder
+    layout.Parent = scroll
+
+    local pad = Instance.new("UIPadding")
+    pad.PaddingTop = UDim.new(0, 10)
+    pad.PaddingBottom = UDim.new(0, 12)
+    pad.PaddingLeft = UDim.new(0, 12)
+    pad.PaddingRight = UDim.new(0, 12)
+    pad.Parent = scroll
+
+    navBtn.MouseButton1Click:Connect(function()
+        switchTab(def.Name, idx)
+    end)
+end
+
+-- Fluent Settings Card with Pill Switch
+local function makeFluentSwitch(parent, titleText, descText, initialState, order, onToggle)
+    local card = Instance.new("Frame")
+    card.Size = UDim2.new(1, 0, 0, 48)
+    card.BackgroundColor3 = Theme.CardBg
+    card.BorderSizePixel = 0
+    card.LayoutOrder = order
+    card.Parent = parent
+    Instance.new("UICorner", card).CornerRadius = UDim.new(0, 6)
+
+    local stroke = Instance.new("UIStroke")
+    stroke.Color = Theme.Border
+    stroke.Thickness = 1
+    stroke.Parent = card
+
+    local title = Instance.new("TextLabel")
+    title.Size = UDim2.new(1, -68, 0, 18)
+    title.Position = UDim2.fromOffset(12, 7)
+    title.BackgroundTransparency = 1
+    title.Text = titleText
+    title.TextColor3 = Theme.TextPrimary
+    title.Font = Enum.Font.GothamMedium
+    title.TextSize = 12
+    title.TextXAlignment = Enum.TextXAlignment.Left
+    title.Parent = card
+
+    local desc = Instance.new("TextLabel")
+    desc.Size = UDim2.new(1, -68, 0, 15)
+    desc.Position = UDim2.fromOffset(12, 25)
+    desc.BackgroundTransparency = 1
+    desc.Text = descText
+    desc.TextColor3 = Theme.TextMuted
+    desc.Font = Enum.Font.Gotham
+    desc.TextSize = 10
+    desc.TextXAlignment = Enum.TextXAlignment.Left
+    desc.Parent = card
+
+    local pill = Instance.new("TextButton")
+    pill.Size = UDim2.fromOffset(40, 20)
+    pill.Position = UDim2.new(1, -52, 0.5, -10)
+    pill.BackgroundColor3 = initialState and Theme.Accent or Theme.SwitchOff
+    pill.Text = ""
+    pill.AutoButtonColor = false
+    pill.Parent = card
+    Instance.new("UICorner", pill).CornerRadius = UDim.new(1, 0)
+
+    local knob = Instance.new("Frame")
+    knob.Size = UDim2.fromOffset(12, 12)
+    knob.Position = initialState and UDim2.fromOffset(24, 4) or UDim2.fromOffset(4, 4)
+    knob.BackgroundColor3 = initialState and Theme.TitleBarBg or Theme.KnobOff
+    knob.BorderSizePixel = 0
+    knob.Parent = pill
+    Instance.new("UICorner", knob).CornerRadius = UDim.new(1, 0)
+
+    local state = initialState
+    local function setVal(newVal)
+        state = newVal
+        local info = TweenInfo.new(0.14, Enum.EasingStyle.Quint, Enum.EasingDirection.Out)
+        TweenService:Create(pill, info, {
+            BackgroundColor3 = state and Theme.Accent or Theme.SwitchOff
+        }):Play()
+        TweenService:Create(knob, info, {
+            Position = state and UDim2.fromOffset(24, 4) or UDim2.fromOffset(4, 4),
+            BackgroundColor3 = state and Theme.TitleBarBg or Theme.KnobOff,
+        }):Play()
+        onToggle(state)
+    end
+
+    pill.MouseButton1Click:Connect(function() setVal(not state) end)
+    card.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then
+            setVal(not state)
+        end
+    end)
+end
+
+-- Fluent Action Button Card
+local function makeFluentButton(parent, btnText, hintText, order, accentStyle, onClick)
+    local btn = Instance.new("TextButton")
+    btn.Size = UDim2.new(1, 0, 0, 36)
+    btn.BackgroundColor3 = accentStyle and Theme.AccentDark or Theme.CardBg
+    btn.TextColor3 = Theme.TextPrimary
+    btn.Font = Enum.Font.GothamMedium
+    btn.TextSize = 11
+    btn.Text = "   " .. btnText .. (hintText and ("  —  " .. hintText) or "")
+    btn.TextXAlignment = Enum.TextXAlignment.Left
+    btn.AutoButtonColor = false
+    btn.LayoutOrder = order
+    btn.Parent = parent
+    Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 6)
+
+    local stroke = Instance.new("UIStroke")
+    stroke.Color = accentStyle and Theme.Accent or Theme.Border
+    stroke.Thickness = 1
+    stroke.Parent = btn
+
+    local baseColor = accentStyle and Theme.AccentDark or Theme.CardBg
+    local hoverColor = accentStyle and Color3.fromRGB(16, 132, 224) or Theme.CardHover
+
+    btn.MouseEnter:Connect(function()
+        TweenService:Create(btn, TweenInfo.new(0.12), { BackgroundColor3 = hoverColor }):Play()
+    end)
+    btn.MouseLeave:Connect(function()
+        TweenService:Create(btn, TweenInfo.new(0.12), { BackgroundColor3 = baseColor }):Play()
+    end)
+    btn.MouseButton1Click:Connect(onClick)
+end
+
+-- Populate ESP Tab
+makeFluentSwitch(Pages.ESP, "Role Highlight ESP", "Outline Murderer, Sheriff, and Innocents", false, 1, function(v)
+    Settings.RoleESP = v
+    updateRoleVisuals()
+end)
+
+makeFluentSwitch(Pages.ESP, "Overhead Role & Distance", "Show name, role tag, and stud distance", false, 2, function(v)
+    Settings.NameTags = v
+    updateRoleVisuals()
+end)
+
+makeFluentSwitch(Pages.ESP, "Dropped Gun Highlight", "Highlight the sheriff gun when dropped", false, 3, function(v)
+    Settings.GunESP = v
+    updateGunESP()
+end)
+
+-- Populate Movement Tab
+makeFluentSwitch(Pages.Movement, "Speed & Jump Boost", "Boost walk speed to 26 and jump power to 58", false, 1, function(v)
+    Settings.SpeedBoost = v
+end)
+
+makeFluentSwitch(Pages.Movement, "Noclip", "Pass through map walls and obstacles", false, 2, function(v)
+    Settings.Noclip = v
+    setNoclip(v)
+end)
+
+makeFluentSwitch(Pages.Movement, "Fly Mode", "WASD to move, Space/Ctrl for vertical altitude", false, 3, function(v)
+    Settings.Fly = v
+    setFly(v)
+end)
+
+makeFluentSwitch(Pages.Movement, "Infinite Jump", "Jump repeatedly in mid-air", false, 4, function(v)
+    Settings.InfJump = v
+    setInfJump(v)
+end)
+
+-- Populate Actions Tab
+makeFluentSwitch(Pages.Actions, "Auto-Grab Dropped Gun", "Automatically pick up dropped gun and return", false, 1, function(v)
+    Settings.AutoGrabGun = v
+end)
+
+makeFluentSwitch(Pages.Actions, "Coin / Candy Farm", "Cycle to nearby coins and seasonal candies", false, 2, function(v)
+    Settings.CoinCollect = v
+    if v then startCoinCollector() end
+end)
+
+makeFluentButton(Pages.Actions, "Grab Dropped Gun Now", "Single pickup", 3, true, function()
+    grabDroppedGun()
+end)
+
+makeFluentButton(Pages.Actions, "Teleport to Murderer", nil, 4, false, function()
+    teleportToRole("Murderer")
+end)
+
+makeFluentButton(Pages.Actions, "Teleport to Sheriff", nil, 5, false, function()
+    teleportToRole("Sheriff")
+end)
+
+makeFluentButton(Pages.Actions, "Teleport to Lobby", "Return to spawn", 6, false, function()
+    teleportToLobby()
+end)
+
+-- Populate Server Tab
+makeFluentSwitch(Pages.Server, "Anti-AFK", "Prevent idle disconnect in lobby", true, 1, function(v)
+    Settings.AntiAFK = v
+end)
+
+makeFluentButton(Pages.Server, "Spectate Murderer", nil, 2, false, function()
+    spectateRole("Murderer")
+end)
+
+makeFluentButton(Pages.Server, "Spectate Sheriff", nil, 3, false, function()
+    spectateRole("Sheriff")
+end)
+
+makeFluentButton(Pages.Server, "Reset Camera", "Follow local character", 4, false, function()
+    spectateRole(nil)
+end)
+
+makeFluentButton(Pages.Server, "Rejoin Server", "Reconnect to current instance", 5, true, function()
+    pcall(function()
+        TeleportService:TeleportToPlaceInstance(game.PlaceId, game.JobId, LocalPlayer)
+    end)
+end)
+
+-- Populate Admin Tab (Owner: Bloxdropo)
+local ownerCard = Instance.new("Frame")
+ownerCard.Size = UDim2.new(1, 0, 0, 56)
+ownerCard.BackgroundColor3 = Theme.CardBg
+ownerCard.BorderSizePixel = 0
+ownerCard.LayoutOrder = 1
+ownerCard.Parent = Pages.Admin
+Instance.new("UICorner", ownerCard).CornerRadius = UDim.new(0, 6)
+
+local ownerStroke = Instance.new("UIStroke")
+ownerStroke.Color = Theme.OwnerGold
+ownerStroke.Thickness = 1.2
+ownerStroke.Parent = ownerCard
+
+local ownerTitle = Instance.new("TextLabel")
+ownerTitle.Size = UDim2.new(1, -16, 0, 20)
+ownerTitle.Position = UDim2.fromOffset(12, 7)
+ownerTitle.BackgroundTransparency = 1
+ownerTitle.Text = "ADMIN AUTHORITY  •  OWNER: Bloxdropo"
+ownerTitle.TextColor3 = Theme.OwnerGold
+ownerTitle.Font = Enum.Font.GothamBold
+ownerTitle.TextSize = 11
+ownerTitle.TextXAlignment = Enum.TextXAlignment.Left
+ownerTitle.Parent = ownerCard
+
+local ownerSub = Instance.new("TextLabel")
+ownerSub.Size = UDim2.new(1, -16, 0, 18)
+ownerSub.Position = UDim2.fromOffset(12, 27)
+ownerSub.BackgroundTransparency = 1
+ownerSub.Text = string.format("Current User: %s  |  Rank: %s (Lv.%d)", LocalPlayer.Name, localRank.Role, localRank.Level)
+ownerSub.TextColor3 = Theme.TextSecondary
+ownerSub.Font = Enum.Font.Code
+ownerSub.TextSize = 10
+ownerSub.TextXAlignment = Enum.TextXAlignment.Left
+ownerSub.Parent = ownerCard
+
+-- Command Input Card
+local cmdCard = Instance.new("Frame")
+cmdCard.Size = UDim2.new(1, 0, 0, 74)
+cmdCard.BackgroundColor3 = Theme.CardBg
+cmdCard.BorderSizePixel = 0
+cmdCard.LayoutOrder = 2
+cmdCard.Parent = Pages.Admin
+Instance.new("UICorner", cmdCard).CornerRadius = UDim.new(0, 6)
+
+local cmdStroke = Instance.new("UIStroke")
+cmdStroke.Color = Theme.Border
+cmdStroke.Thickness = 1
+cmdStroke.Parent = cmdCard
+
+local cmdBox = Instance.new("TextBox")
+cmdBox.Size = UDim2.new(1, -94, 0, 30)
+cmdBox.Position = UDim2.fromOffset(10, 10)
+cmdBox.BackgroundColor3 = Theme.SubtleBg
+cmdBox.TextColor3 = Theme.TextPrimary
+cmdBox.PlaceholderText = ";tp player | ;speed 40 | ;fly | ;fling | ;reset"
+cmdBox.PlaceholderColor3 = Theme.TextMuted
+cmdBox.Font = Enum.Font.Code
+cmdBox.TextSize = 11
+cmdBox.Text = ""
+cmdBox.ClearTextOnFocus = false
+cmdBox.TextXAlignment = Enum.TextXAlignment.Left
+cmdBox.Parent = cmdCard
+Instance.new("UICorner", cmdBox).CornerRadius = UDim.new(0, 6)
+
+local execCmdBtn = Instance.new("TextButton")
+execCmdBtn.Size = UDim2.fromOffset(70, 30)
+execCmdBtn.Position = UDim2.new(1, -80, 0, 10)
+execCmdBtn.BackgroundColor3 = Theme.AccentDark
+execCmdBtn.TextColor3 = Theme.TextPrimary
+execCmdBtn.Font = Enum.Font.GothamBold
+execCmdBtn.TextSize = 11
+execCmdBtn.Text = "Run"
+execCmdBtn.Parent = cmdCard
+Instance.new("UICorner", execCmdBtn).CornerRadius = UDim.new(0, 6)
+
+adminFeedbackLabel = Instance.new("TextLabel")
+adminFeedbackLabel.Size = UDim2.new(1, -20, 0, 20)
+adminFeedbackLabel.Position = UDim2.fromOffset(10, 46)
+adminFeedbackLabel.BackgroundTransparency = 1
+adminFeedbackLabel.Text = "Ready. Bloxdropo has Owner access."
+adminFeedbackLabel.TextColor3 = Theme.TextMuted
+adminFeedbackLabel.Font = Enum.Font.Code
+adminFeedbackLabel.TextSize = 10
+adminFeedbackLabel.TextXAlignment = Enum.TextXAlignment.Left
+adminFeedbackLabel.Parent = cmdCard
+
+execCmdBtn.MouseButton1Click:Connect(function()
+    runAdminCommand(cmdBox.Text)
+end)
+
+cmdBox.FocusLost:Connect(function(enterPressed)
+    if enterPressed then
+        runAdminCommand(cmdBox.Text)
+    end
+end)
+
+-- Target Player Cycle Card
+local targetCard = Instance.new("Frame")
+targetCard.Size = UDim2.new(1, 0, 0, 42)
+targetCard.BackgroundColor3 = Theme.CardBg
+targetCard.BorderSizePixel = 0
+targetCard.LayoutOrder = 3
+targetCard.Parent = Pages.Admin
+Instance.new("UICorner", targetCard).CornerRadius = UDim.new(0, 6)
+
+local targetStroke = Instance.new("UIStroke")
+targetStroke.Color = Theme.Border
+targetStroke.Thickness = 1
+targetStroke.Parent = targetCard
+
+local targetLabel = Instance.new("TextLabel")
+targetLabel.Size = UDim2.new(1, -106, 1, 0)
+targetLabel.Position = UDim2.fromOffset(12, 0)
+targetLabel.BackgroundTransparency = 1
+targetLabel.Text = "Target: None"
+targetLabel.TextColor3 = Theme.TextPrimary
+targetLabel.Font = Enum.Font.GothamMedium
+targetLabel.TextSize = 11
+targetLabel.TextXAlignment = Enum.TextXAlignment.Left
+targetLabel.Parent = targetCard
+
+local cycleTargetBtn = Instance.new("TextButton")
+cycleTargetBtn.Size = UDim2.fromOffset(86, 26)
+cycleTargetBtn.Position = UDim2.new(1, -96, 0.5, -13)
+cycleTargetBtn.BackgroundColor3 = Theme.SubtleBg
+cycleTargetBtn.TextColor3 = Theme.Accent
+cycleTargetBtn.Font = Enum.Font.GothamBold
+cycleTargetBtn.TextSize = 10
+cycleTargetBtn.Text = "Next Player"
+cycleTargetBtn.Parent = targetCard
+Instance.new("UICorner", cycleTargetBtn).CornerRadius = UDim.new(0, 6)
+
+local function refreshTargetDisplay()
+    if selectedTargetPlayer and selectedTargetPlayer.Parent then
+        local tRank = getUserRank(selectedTargetPlayer)
+        targetLabel.Text = string.format("Target: %s [%s]", selectedTargetPlayer.Name, tRank.Role)
+    else
+        selectedTargetPlayer = nil
+        targetLabel.Text = "Target: None"
+    end
+end
+
+cycleTargetBtn.MouseButton1Click:Connect(function()
+    local list = {}
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr ~= LocalPlayer then
+            table.insert(list, plr)
+        end
+    end
+    if #list == 0 then
+        selectedTargetPlayer = nil
+        refreshTargetDisplay()
+        return
+    end
+
+    local nextIdx = 1
+    if selectedTargetPlayer then
+        for i, plr in ipairs(list) do
+            if plr == selectedTargetPlayer then
+                nextIdx = (i % #list) + 1
+                break
+            end
+        end
+    end
+    selectedTargetPlayer = list[nextIdx]
+    refreshTargetDisplay()
+end)
+
+Players.PlayerRemoving:Connect(function(plr)
+    if plr == selectedTargetPlayer then
+        selectedTargetPlayer = nil
+        refreshTargetDisplay()
+    end
+end)
+
+makeFluentButton(Pages.Admin, "TP to Target", "Snap to selected player", 4, true, function()
+    if selectedTargetPlayer and teleportToPlayer(selectedTargetPlayer) then
+        setAdminFeedback("Teleported to " .. selectedTargetPlayer.Name, false)
+    else
+        setAdminFeedback("Select a target player first.", true)
+    end
+end)
+
+makeFluentButton(Pages.Admin, "Spectate / Unspectate Target", "Toggle camera on target", 5, false, function()
+    if not selectedTargetPlayer then
+        setAdminFeedback("Select a target player first.", true)
+        return
+    end
+    local targetHum = selectedTargetPlayer.Character and selectedTargetPlayer.Character:FindFirstChildOfClass("Humanoid")
+    if targetHum and Camera.CameraSubject == targetHum then
+        spectatePlayer(nil)
+        setAdminFeedback("Stopped spectating " .. selectedTargetPlayer.Name, false)
+    else
+        spectatePlayer(selectedTargetPlayer)
+        setAdminFeedback("Spectating " .. selectedTargetPlayer.Name, false)
+    end
+end)
+
+makeFluentButton(Pages.Admin, "Fling Target", "High-spin impulse on target", 6, false, function()
+    if selectedTargetPlayer then
+        setAdminFeedback("Flinging " .. selectedTargetPlayer.Name .. "...", false)
+        task.spawn(function() flingTarget(selectedTargetPlayer) end)
+    else
+        setAdminFeedback("Select a target player first.", true)
+    end
+end)
+
+makeFluentButton(Pages.Admin, "Reset All Cheats & Cam", "Restore default speed, jump & camera", 7, false, function()
+    resetAllStates()
+    setAdminFeedback("Reset all active states to default.", false)
+end)
+
+switchTab("ESP", 1)
+
+UserInputService.InputBegan:Connect(function(input, gp)
+    if not gp and input.KeyCode == Enum.KeyCode.RightShift then
+        Window.Visible = not Window.Visible
+    end
+end)
+
+RunService.Heartbeat:Connect(function()
+    local murName, shfName = "--", "--"
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr ~= LocalPlayer then
+            local role = getPlayerRole(plr)
+            if role == "Murderer" then
+                murName = plr.Name
+            elseif role == "Sheriff" then
+                shfName = plr.Name
+            end
+        end
+    end
+    StatusPill.Text = string.format("Mur: %s\nShf: %s", murName, shfName)
+
+    local char = LocalPlayer.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+
+    if hum then
+        if Settings.SpeedBoost then
+            hum.WalkSpeed = Settings.WalkSpeed
+            hum.UseJumpPower = true
+            hum.JumpPower = Settings.JumpPower
+        elseif hum.WalkSpeed == Settings.WalkSpeed then
+            hum.WalkSpeed = 16
+            hum.JumpPower = 50
+        end
+    end
+
+    if Settings.Fly and root and flyBV and flyBG then
+        local cam = Camera.CFrame
+        local move = Vector3.zero
+        if UserInputService:IsKeyDown(Enum.KeyCode.W) then move += cam.LookVector end
+        if UserInputService:IsKeyDown(Enum.KeyCode.S) then move -= cam.LookVector end
+        if UserInputService:IsKeyDown(Enum.KeyCode.A) then move -= cam.RightVector end
+        if UserInputService:IsKeyDown(Enum.KeyCode.D) then move += cam.RightVector end
+        if UserInputService:IsKeyDown(Enum.KeyCode.Space) then move += Vector3.new(0, 1, 0) end
+        if UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) then move -= Vector3.new(0, 1, 0) end
+        flyBV.Velocity = (move.Magnitude > 0 and move.Unit or Vector3.zero) * Settings.FlySpeed
+        flyBG.CFrame = cam
+    end
+
+    if Settings.AutoGrabGun and findDroppedGun() then
+        task.spawn(grabDroppedGun)
+    end
+
+    updateRoleVisuals()
+    updateGunESP()
+end)
